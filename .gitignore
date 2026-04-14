@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment
+.env
+
+# DuckDB data
+data/*.duckdb
+data/*.duckdb.wal
+data/staging/
+data/watermarks.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+~.xlsx
+*.db
+.claude/
