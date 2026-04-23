@@ -317,30 +317,57 @@ def load_scd2(
 def load_star_schema(
     dim_df: pd.DataFrame,
     fact_df: pd.DataFrame,
+    dim_branch_df: pd.DataFrame,
+    dim_date_df: pd.DataFrame,
     db_path: str | None = None,
     progress_callback=None,
 ) -> None:
     """
-    Load the star-schema tables (dim + fact) into DuckDB.
+    Load all star-schema tables into DuckDB.
 
-    Replaces any existing dim_account_customer and fact_transactions tables.
+    Load order respects FK dependencies:
+      1. dim_date  (immutable, replace)
+      2. dim_branch (SCD Type 2)
+      3. dim_account_customer (SCD Type 2)
+      4. fact_transactions (replace)
     """
+    from src.config import (
+        DIM_DATE_TABLE, DIM_BRANCH_TABLE, DIM_TABLE, FACT_TABLE,
+        SCD2_TRACKED_COLS, SCD2_NATURAL_KEYS, SCD2_SURROGATE_KEYS,
+    )
+
     conn = get_duck_conn(db_path)
 
     if progress_callback:
-        progress_callback("Loading dimension table", 1, 2)
-
-    load_table(conn, dim_df, DIM_TABLE, mode="replace")
-    log.info("  Loaded %s → %d rows", DIM_TABLE, len(dim_df))
+        progress_callback("Loading dim_date", 1, 4)
+    load_table(conn, dim_date_df, DIM_DATE_TABLE, mode="replace")
+    log.info("  Loaded %s → %d rows", DIM_DATE_TABLE, len(dim_date_df))
 
     if progress_callback:
-        progress_callback("Loading fact table", 2, 2)
+        progress_callback("Loading dim_branch (SCD2)", 2, 4)
+    load_scd2(
+        conn, dim_branch_df, DIM_BRANCH_TABLE,
+        natural_key=SCD2_NATURAL_KEYS[DIM_BRANCH_TABLE],
+        tracked_cols=SCD2_TRACKED_COLS[DIM_BRANCH_TABLE],
+        surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_BRANCH_TABLE],
+    )
 
+    if progress_callback:
+        progress_callback("Loading dim_account_customer (SCD2)", 3, 4)
+    load_scd2(
+        conn, dim_df, DIM_TABLE,
+        natural_key=SCD2_NATURAL_KEYS[DIM_TABLE],
+        tracked_cols=SCD2_TRACKED_COLS[DIM_TABLE],
+        surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_TABLE],
+    )
+
+    if progress_callback:
+        progress_callback("Loading fact_transactions", 4, 4)
     load_table(conn, fact_df, FACT_TABLE, mode="replace")
     log.info("  Loaded %s → %d rows", FACT_TABLE, len(fact_df))
 
     conn.close()
-    log.info("Star schema loaded successfully into DuckDB")
+    log.info("Galaxy schema loaded successfully into DuckDB")
 
 
 # ── Batch Loaders ─────────────────────────────────────

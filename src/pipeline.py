@@ -23,11 +23,8 @@ from src.extract import (
     get_pg_engine, extract_all, extract_all_incremental,
     extract_tables_to_parquet,
 )
-from src.transform import (
-    parse_mapping_sheet, get_required_source_tables,
-    run_mapping_transforms, run_default_transforms,
-)
-from src.load import load_all, load_all_staged, load_star_schema
+from src.transform import run_default_transforms
+from src.load import load_all, load_all_staged, load_star_schema, load_table, load_scd2, get_duck_conn
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,96 +44,100 @@ def run_mapping_pipeline(
     db_path: str | None = None,
     progress_callback=None,
 ) -> PipelineRunMeta:
-    """
-    Execute the three-phase mapping-sheet-driven ETL pipeline.
+    """Execute the three-phase mapping-sheet-driven ETL pipeline (galaxy schema)."""
+    from src.transform import (
+        parse_mapping_sheet, get_required_source_tables,
+        run_hybrid_transforms, build_fact_transactions,
+    )
+    from src.load import load_table, load_scd2, get_duck_conn
 
-    Parameters
-    ----------
-    mapping_sheet_path : str | Path
-        Path to the DataBridge mapping sheet (.xlsx).
-    db_path : str | None
-        Override DuckDB path.
-    progress_callback : callable | None
-        Optional callback(phase: str, message: str, pct: float)
-        where pct is 0.0–1.0 for progress bar updates.
-
-    Returns
-    -------
-    PipelineRunMeta
-        Metadata about the pipeline run.
-    """
     meta = PipelineRunMeta(
         run_id=datetime.now().strftime("%Y%m%d_%H%M%S"),
         started_at=datetime.now(),
     )
 
     def _progress(phase: str, msg: str, pct: float):
-        meta.phase = phase
+        meta.phase  = phase
         meta.status = phase.lower().replace(" ", "_")
         if progress_callback:
             progress_callback(phase, msg, pct)
         log.info("  [%s] %s (%.0f%%)", phase, msg, pct * 100)
 
     try:
-        # ────────────────────────────────────────────────
-        # Phase 1: EXTRACT — PostgreSQL → Parquet
-        # ────────────────────────────────────────────────
+        # ── Phase 1: EXTRACT ──────────────────────────
         _progress("Extract", "Parsing mapping sheet…", 0.05)
-        mapping = parse_mapping_sheet(mapping_sheet_path)
+        mapping      = parse_mapping_sheet(mapping_sheet_path)
         source_tables = get_required_source_tables(mapping)
 
-        _progress("Extract", f"Connecting to PostgreSQL…", 0.10)
+        _progress("Extract", "Connecting to PostgreSQL…", 0.10)
         engine = get_pg_engine()
 
-        _progress("Extract", f"Extracting {len(source_tables)} tables to Parquet…", 0.15)
-
+        _progress("Extract", f"Extracting {len(source_tables)} tables…", 0.15)
         parquet_dir = STAGING_DIR
         manifest = extract_tables_to_parquet(
             engine, source_tables, parquet_dir,
             progress_callback=lambda name, idx, total: _progress(
-                "Extract",
-                f"Extracted {name} ({idx}/{total})",
-                0.15 + (0.25 * idx / total),
+                "Extract", f"Extracted {name} ({idx}/{total})",
+                0.15 + 0.20 * idx / total,
             ),
         )
-
         meta.tables_extracted = list(manifest.keys())
-        meta.parquet_files = [str(p) for p in manifest.values()]
+        meta.parquet_files    = [str(p) for p in manifest.values()]
 
-        # ────────────────────────────────────────────────
-        # Phase 2: TRANSFORM — Parquet → Star Schema
-        # ────────────────────────────────────────────────
-        _progress("Transform", "Building star-schema tables…", 0.45)
-
-        result_dfs = run_mapping_transforms(
+        # ── Phase 2: TRANSFORM dims ───────────────────
+        _progress("Transform", "Building dimension tables…", 0.40)
+        dim_results = run_hybrid_transforms(
             parquet_dir, mapping,
             progress_callback=lambda name, step, total: _progress(
-                "Transform",
-                name,
-                0.45 + (0.25 * step / total),
+                "Transform", name, 0.40 + 0.15 * step / total,
             ),
         )
+        dim_df        = dim_results.get("dim_account_customer", None)
+        dim_branch_df = dim_results.get("dim_branch", None)
+        dim_date_df   = dim_results.get("dim_date", None)
 
-        dim_df = result_dfs["dim_account_customer"]
-        fact_df = result_dfs["fact_transactions"]
-        meta.dim_row_count = len(dim_df)
+        # ── Phase 3a: LOAD dims ───────────────────────
+        _progress("Load", "Loading dimension tables…", 0.60)
+        target_db = db_path or DUCKDB_PATH
+
+        conn = get_duck_conn(target_db)
+        from src.config import (
+            DIM_DATE_TABLE, DIM_BRANCH_TABLE, DIM_TABLE,
+            SCD2_TRACKED_COLS, SCD2_NATURAL_KEYS, SCD2_SURROGATE_KEYS,
+        )
+
+        load_table(conn, dim_date_df, DIM_DATE_TABLE, mode="replace")
+        load_scd2(conn, dim_branch_df, DIM_BRANCH_TABLE,
+                  natural_key=SCD2_NATURAL_KEYS[DIM_BRANCH_TABLE],
+                  tracked_cols=SCD2_TRACKED_COLS[DIM_BRANCH_TABLE],
+                  surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_BRANCH_TABLE])
+        load_scd2(conn, dim_df, DIM_TABLE,
+                  natural_key=SCD2_NATURAL_KEYS[DIM_TABLE],
+                  tracked_cols=SCD2_TRACKED_COLS[DIM_TABLE],
+                  surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_TABLE])
+
+        # ── Phase 3b: Build fact with current-state SKs ──
+        _progress("Transform", "Building fact table with SK lookups…", 0.72)
+        dim_lookup = conn.execute(
+            f"SELECT account_sk, account_id FROM {DIM_TABLE} WHERE is_current = TRUE"
+        ).fetchdf()
+        branch_lookup = conn.execute(
+            f"SELECT branch_sk, branch_id FROM {DIM_BRANCH_TABLE} WHERE is_current = TRUE"
+        ).fetchdf()
+
+        fact_df = build_fact_transactions(
+            parquet_dir, dim_lookup, dim_date_df, branch_lookup
+        )
+        meta.dim_row_count  = len(dim_df)
         meta.fact_row_count = len(fact_df)
 
-        # ────────────────────────────────────────────────
-        # Phase 3: LOAD — DataFrames → DuckDB
-        # ────────────────────────────────────────────────
-        _progress("Load", "Loading star schema into DuckDB…", 0.75)
+        # ── Phase 3c: LOAD fact ───────────────────────
+        _progress("Load", "Loading fact table…", 0.85)
+        from src.config import FACT_TABLE as _FACT_TABLE
+        load_table(conn, fact_df, _FACT_TABLE, mode="replace")
+        conn.close()
 
-        load_star_schema(
-            dim_df, fact_df, db_path,
-            progress_callback=lambda name, step, total: _progress(
-                "Load",
-                name,
-                0.75 + (0.20 * step / total),
-            ),
-        )
-
-        meta.status = "done"
+        meta.status      = "done"
         meta.finished_at = datetime.now()
         _progress("Done", "Pipeline complete!", 1.0)
         log.info(
@@ -145,9 +146,9 @@ def run_mapping_pipeline(
         )
 
     except Exception as exc:
-        meta.status = "failed"
+        meta.status        = "failed"
         meta.error_message = str(exc)
-        meta.finished_at = datetime.now()
+        meta.finished_at   = datetime.now()
         log.error("Pipeline FAILED: %s", exc, exc_info=True)
         if progress_callback:
             progress_callback("Error", str(exc), 0.0)
