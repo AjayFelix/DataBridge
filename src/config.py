@@ -33,10 +33,34 @@ WATERMARK_PATH = Path(os.getenv("WATERMARK_PATH", "data/watermarks.json"))
 DIM_TABLE = "dim_account_customer"
 FACT_TABLE = "fact_transactions"
 
+# ── New Dimension Tables ──────────────────────────────
+DIM_DATE_TABLE   = "dim_date"
+DIM_BRANCH_TABLE = "dim_branch"
+
 # ── Primary Keys ──────────────────────────────────────
 PK_MAP = {
-    DIM_TABLE: "account_sk",
-    FACT_TABLE: "transaction_id",
+    DIM_TABLE:        "account_sk",
+    FACT_TABLE:       "transaction_id",
+    DIM_DATE_TABLE:   "date_sk",
+    DIM_BRANCH_TABLE: "branch_sk",
+}
+
+# ── SCD Type 2 Configuration ──────────────────────────
+SCD2_TABLES: set[str] = {"dim_branch", "dim_account_customer"}
+
+SCD2_TRACKED_COLS: dict[str, list[str]] = {
+    "dim_branch":           ["branch_name", "city", "state"],
+    "dim_account_customer": ["account_type", "branch_name", "has_active_card"],
+}
+
+SCD2_NATURAL_KEYS: dict[str, str] = {
+    "dim_branch":           "branch_id",
+    "dim_account_customer": "account_id",
+}
+
+SCD2_SURROGATE_KEYS: dict[str, str] = {
+    "dim_branch":           "branch_sk",
+    "dim_account_customer": "account_sk",
 }
 
 
