@@ -168,8 +168,9 @@ def _vals_equal(a, b) -> bool:
     - NaN == NaN (both float NaN → equal, no false-positive change)
     - None == None (both null → equal)
     - None vs NaN cross-type (both are "null" → equal)
-    - np.bool_ and np.integer types (not just Python bool/int)
-    - bool/int coercion (True == 1, False == 0 → equal)
+    - np.bool_ types: compared as bool (matches Python bool semantics)
+    - integers: fall through to standard == (10 != 20, no bool coercion)
+    - bool/int cross-type: Python's natural True==1/False==0 applies via fallthrough
     - everything else uses standard equality
     """
     a_nan = a is None or (isinstance(a, float) and math.isnan(a))
