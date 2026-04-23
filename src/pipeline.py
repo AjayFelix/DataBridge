@@ -49,7 +49,6 @@ def run_mapping_pipeline(
         parse_mapping_sheet, get_required_source_tables,
         run_hybrid_transforms, build_fact_transactions,
     )
-    from src.load import load_table, load_scd2, get_duck_conn
 
     meta = PipelineRunMeta(
         run_id=datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -96,46 +95,51 @@ def run_mapping_pipeline(
         dim_branch_df = dim_results.get("dim_branch", None)
         dim_date_df   = dim_results.get("dim_date", None)
 
+        for _name, _df in [("dim_date", dim_date_df), ("dim_branch", dim_branch_df), ("dim_account_customer", dim_df)]:
+            if _df is None:
+                raise ValueError(f"run_hybrid_transforms did not produce '{_name}' — check mapping sheet")
+
         # ── Phase 3a: LOAD dims ───────────────────────
         _progress("Load", "Loading dimension tables…", 0.60)
         target_db = db_path or DUCKDB_PATH
 
         conn = get_duck_conn(target_db)
         from src.config import (
-            DIM_DATE_TABLE, DIM_BRANCH_TABLE, DIM_TABLE,
+            DIM_DATE_TABLE, DIM_BRANCH_TABLE, DIM_TABLE, FACT_TABLE,
             SCD2_TRACKED_COLS, SCD2_NATURAL_KEYS, SCD2_SURROGATE_KEYS,
         )
 
-        load_table(conn, dim_date_df, DIM_DATE_TABLE, mode="replace")
-        load_scd2(conn, dim_branch_df, DIM_BRANCH_TABLE,
-                  natural_key=SCD2_NATURAL_KEYS[DIM_BRANCH_TABLE],
-                  tracked_cols=SCD2_TRACKED_COLS[DIM_BRANCH_TABLE],
-                  surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_BRANCH_TABLE])
-        load_scd2(conn, dim_df, DIM_TABLE,
-                  natural_key=SCD2_NATURAL_KEYS[DIM_TABLE],
-                  tracked_cols=SCD2_TRACKED_COLS[DIM_TABLE],
-                  surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_TABLE])
+        try:
+            load_table(conn, dim_date_df, DIM_DATE_TABLE, mode="replace")
+            load_scd2(conn, dim_branch_df, DIM_BRANCH_TABLE,
+                      natural_key=SCD2_NATURAL_KEYS[DIM_BRANCH_TABLE],
+                      tracked_cols=SCD2_TRACKED_COLS[DIM_BRANCH_TABLE],
+                      surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_BRANCH_TABLE])
+            load_scd2(conn, dim_df, DIM_TABLE,
+                      natural_key=SCD2_NATURAL_KEYS[DIM_TABLE],
+                      tracked_cols=SCD2_TRACKED_COLS[DIM_TABLE],
+                      surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_TABLE])
 
-        # ── Phase 3b: Build fact with current-state SKs ──
-        _progress("Transform", "Building fact table with SK lookups…", 0.72)
-        dim_lookup = conn.execute(
-            f"SELECT account_sk, account_id FROM {DIM_TABLE} WHERE is_current = TRUE"
-        ).fetchdf()
-        branch_lookup = conn.execute(
-            f"SELECT branch_sk, branch_id FROM {DIM_BRANCH_TABLE} WHERE is_current = TRUE"
-        ).fetchdf()
+            # ── Phase 3b: Build fact with current-state SKs ──
+            _progress("Transform", "Building fact table with SK lookups…", 0.72)
+            dim_lookup = conn.execute(
+                f"SELECT account_sk, account_id FROM {DIM_TABLE} WHERE is_current = TRUE"
+            ).fetchdf()
+            branch_lookup = conn.execute(
+                f"SELECT branch_sk, branch_id FROM {DIM_BRANCH_TABLE} WHERE is_current = TRUE"
+            ).fetchdf()
 
-        fact_df = build_fact_transactions(
-            parquet_dir, dim_lookup, dim_date_df, branch_lookup
-        )
-        meta.dim_row_count  = len(dim_df)
-        meta.fact_row_count = len(fact_df)
+            fact_df = build_fact_transactions(
+                parquet_dir, dim_lookup, dim_date_df, branch_lookup
+            )
+            meta.dim_row_count  = len(dim_df)
+            meta.fact_row_count = len(fact_df)
 
-        # ── Phase 3c: LOAD fact ───────────────────────
-        _progress("Load", "Loading fact table…", 0.85)
-        from src.config import FACT_TABLE as _FACT_TABLE
-        load_table(conn, fact_df, _FACT_TABLE, mode="replace")
-        conn.close()
+            # ── Phase 3c: LOAD fact ───────────────────────
+            _progress("Load", "Loading fact table…", 0.85)
+            load_table(conn, fact_df, FACT_TABLE, mode="replace")
+        finally:
+            conn.close()
 
         meta.status      = "done"
         meta.finished_at = datetime.now()

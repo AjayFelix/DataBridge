@@ -338,35 +338,37 @@ def load_star_schema(
 
     conn = get_duck_conn(db_path)
 
-    if progress_callback:
-        progress_callback("Loading dim_date", 1, 4)
-    load_table(conn, dim_date_df, DIM_DATE_TABLE, mode="replace")
-    log.info("  Loaded %s → %d rows", DIM_DATE_TABLE, len(dim_date_df))
+    try:
+        if progress_callback:
+            progress_callback("Load", "Loading dim_date", 0.25)
+        load_table(conn, dim_date_df, DIM_DATE_TABLE, mode="replace")
+        log.info("  Loaded %s → %d rows", DIM_DATE_TABLE, len(dim_date_df))
 
-    if progress_callback:
-        progress_callback("Loading dim_branch (SCD2)", 2, 4)
-    load_scd2(
-        conn, dim_branch_df, DIM_BRANCH_TABLE,
-        natural_key=SCD2_NATURAL_KEYS[DIM_BRANCH_TABLE],
-        tracked_cols=SCD2_TRACKED_COLS[DIM_BRANCH_TABLE],
-        surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_BRANCH_TABLE],
-    )
+        if progress_callback:
+            progress_callback("Load", "Loading dim_branch (SCD2)", 0.50)
+        load_scd2(
+            conn, dim_branch_df, DIM_BRANCH_TABLE,
+            natural_key=SCD2_NATURAL_KEYS[DIM_BRANCH_TABLE],
+            tracked_cols=SCD2_TRACKED_COLS[DIM_BRANCH_TABLE],
+            surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_BRANCH_TABLE],
+        )
 
-    if progress_callback:
-        progress_callback("Loading dim_account_customer (SCD2)", 3, 4)
-    load_scd2(
-        conn, dim_df, DIM_TABLE,
-        natural_key=SCD2_NATURAL_KEYS[DIM_TABLE],
-        tracked_cols=SCD2_TRACKED_COLS[DIM_TABLE],
-        surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_TABLE],
-    )
+        if progress_callback:
+            progress_callback("Load", "Loading dim_account_customer (SCD2)", 0.75)
+        load_scd2(
+            conn, dim_df, DIM_TABLE,
+            natural_key=SCD2_NATURAL_KEYS[DIM_TABLE],
+            tracked_cols=SCD2_TRACKED_COLS[DIM_TABLE],
+            surrogate_key_col=SCD2_SURROGATE_KEYS[DIM_TABLE],
+        )
 
-    if progress_callback:
-        progress_callback("Loading fact_transactions", 4, 4)
-    load_table(conn, fact_df, FACT_TABLE, mode="replace")
-    log.info("  Loaded %s → %d rows", FACT_TABLE, len(fact_df))
+        if progress_callback:
+            progress_callback("Load", "Loading fact_transactions", 1.0)
+        load_table(conn, fact_df, FACT_TABLE, mode="replace")
+        log.info("  Loaded %s → %d rows", FACT_TABLE, len(fact_df))
+    finally:
+        conn.close()
 
-    conn.close()
     log.info("Galaxy schema loaded successfully into DuckDB")
 
 

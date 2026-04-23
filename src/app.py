@@ -402,6 +402,7 @@ if page == "🚀 Pipeline Control":
             try:
                 from src.transform import parse_mapping_sheet
                 mapping = parse_mapping_sheet(tmp_path)
+                st.session_state["parsed_mapping"] = mapping
 
                 st.markdown("#### ✅ Mapping Parsed Successfully")
 
@@ -737,6 +738,91 @@ elif page == "📝 SQL Workbench":
             "GROUP BY d.customer_name, d.account_type, d.branch_name "
             "ORDER BY total_spent DESC LIMIT 15"
         ),
+        # ── Dimensional joins ─────────────────────────
+        "Transactions by Quarter (dim_date join)": (
+            "SELECT d.year, d.quarter,\n"
+            "       COUNT(*) AS txn_count,\n"
+            "       ROUND(SUM(f.amount), 2) AS total_amount\n"
+            "FROM fact_transactions f\n"
+            "JOIN dim_date d ON f.date_sk = d.date_sk\n"
+            "GROUP BY d.year, d.quarter\n"
+            "ORDER BY d.year, d.quarter"
+        ),
+        "Branch performance (three-way join)": (
+            "SELECT b.branch_name, b.city,\n"
+            "       COUNT(*) AS txns,\n"
+            "       ROUND(SUM(f.amount), 2) AS volume\n"
+            "FROM fact_transactions f\n"
+            "JOIN dim_account_customer a ON f.account_sk = a.account_sk\n"
+            "JOIN dim_branch b ON f.branch_sk = b.branch_sk\n"
+            "WHERE b.is_current = TRUE\n"
+            "GROUP BY b.branch_name, b.city\n"
+            "ORDER BY volume DESC"
+        ),
+        # ── Window functions ──────────────────────────
+        "Running total per account (LAG + cumulative SUM)": (
+            "SELECT transaction_id, account_sk,\n"
+            "       transaction_date, amount,\n"
+            "       SUM(amount) OVER (\n"
+            "           PARTITION BY account_sk\n"
+            "           ORDER BY transaction_date\n"
+            "       ) AS running_total,\n"
+            "       amount - LAG(amount, 1, 0) OVER (\n"
+            "           PARTITION BY account_sk\n"
+            "           ORDER BY transaction_date\n"
+            "       ) AS delta_from_prev\n"
+            "FROM fact_transactions\n"
+            "ORDER BY account_sk, transaction_date"
+        ),
+        "Account rank per branch (RANK OVER)": (
+            "SELECT a.branch_name, a.customer_name,\n"
+            "       ROUND(SUM(f.amount), 2) AS total_spent,\n"
+            "       RANK() OVER (\n"
+            "           PARTITION BY a.branch_name\n"
+            "           ORDER BY SUM(f.amount) DESC\n"
+            "       ) AS branch_rank\n"
+            "FROM fact_transactions f\n"
+            "JOIN dim_account_customer a ON f.account_sk = a.account_sk\n"
+            "WHERE a.is_current = TRUE\n"
+            "GROUP BY a.branch_name, a.customer_name\n"
+            "ORDER BY a.branch_name, branch_rank"
+        ),
+        # ── CTE ───────────────────────────────────────
+        "Monthly cohort summary (CTE)": (
+            "WITH monthly AS (\n"
+            "    SELECT d.year, d.month, d.month_name,\n"
+            "           COUNT(*) AS txn_count,\n"
+            "           ROUND(SUM(f.amount), 2) AS total_amount,\n"
+            "           ROUND(AVG(f.amount), 2) AS avg_amount\n"
+            "    FROM fact_transactions f\n"
+            "    JOIN dim_date d ON f.date_sk = d.date_sk\n"
+            "    GROUP BY d.year, d.month, d.month_name\n"
+            ")\n"
+            "SELECT * FROM monthly ORDER BY year, month"
+        ),
+        # ── SCD Type 2 history queries ────────────────
+        "SCD2: Full version history for account_id = 1": (
+            "SELECT account_id, account_type, branch_name, has_active_card,\n"
+            "       version, effective_from, effective_to, is_current\n"
+            "FROM dim_account_customer\n"
+            "WHERE account_id = 1\n"
+            "ORDER BY version"
+        ),
+        "SCD2: Accounts that changed type this year": (
+            "SELECT account_id, customer_name, account_type, effective_from\n"
+            "FROM dim_account_customer\n"
+            "WHERE version > 1\n"
+            "  AND EXTRACT(year FROM CAST(effective_from AS DATE)) = EXTRACT(year FROM CURRENT_DATE)\n"
+            "ORDER BY effective_from DESC"
+        ),
+        "SCD2: Point-in-time branch lookup for 2024-03-01": (
+            "SELECT branch_id, branch_name, city, state,\n"
+            "       effective_from, effective_to, is_current\n"
+            "FROM dim_branch\n"
+            "WHERE effective_from <= DATE '2024-03-01'\n"
+            "  AND (effective_to > DATE '2024-03-01' OR effective_to IS NULL)\n"
+            "ORDER BY branch_id"
+        ),
     }
 
     selected_template = st.selectbox(
@@ -967,59 +1053,63 @@ elif page == "📋 Data Lineage":
     st.markdown("Trace every column from source to target with transformation rules.")
     st.markdown("---")
 
-    # Static mapping data (from the mapping sheet)
-    dim_mappings = [
-        {"Target": "account_sk", "Type": "INTEGER", "Source": "—", "Transform": "Auto-generated: incrementing integer based on account_id"},
-        {"Target": "account_id", "Type": "INTEGER", "Source": "accounts.account_id", "Transform": "Direct mapping (Natural Key)"},
-        {"Target": "customer_id", "Type": "INTEGER", "Source": "customers.customer_id", "Transform": "INNER JOIN accounts ↔ customers ON customer_id"},
-        {"Target": "customer_name", "Type": "VARCHAR", "Source": "customers.full_name", "Transform": "Direct mapping (renamed)"},
-        {"Target": "customer_state", "Type": "VARCHAR", "Source": "customers.state", "Transform": "Direct mapping (renamed)"},
-        {"Target": "branch_name", "Type": "VARCHAR", "Source": "branches.branch_name", "Transform": "LEFT JOIN accounts ↔ branches ON branch_id"},
-        {"Target": "account_type", "Type": "VARCHAR", "Source": "accounts.account_type", "Transform": "Direct mapping"},
-        {"Target": "has_active_card", "Type": "BOOLEAN", "Source": "cards.is_active", "Transform": "Derived: ANY(is_active) grouped by account_id"},
-    ]
+    # ── Live mapping from uploaded sheet ─────────────
+    mapping_data = st.session_state.get("parsed_mapping", None)
 
-    fact_mappings = [
-        {"Target": "transaction_id", "Type": "INTEGER", "Source": "transactions.transaction_id", "Transform": "Direct mapping"},
-        {"Target": "account_sk", "Type": "INTEGER", "Source": "dim_account_customer.account_sk", "Transform": "Lookup: Match account_id → retrieve SK from dimension"},
-        {"Target": "transaction_date", "Type": "DATE", "Source": "transactions.txn_timestamp", "Transform": "Cast: Extract DATE from TIMESTAMP"},
-        {"Target": "transaction_type", "Type": "VARCHAR", "Source": "transaction_types.type_name", "Transform": "LEFT JOIN transactions ↔ transaction_types ON type_id"},
-        {"Target": "amount", "Type": "DECIMAL", "Source": "transactions.amount", "Transform": "Direct mapping"},
-    ]
-
-    # Dimension table lineage
-    st.markdown("### 🔷 dim_account_customer")
-    st.markdown("*Wide dimension table joining accounts, customers, branches, and cards.*")
-    st.dataframe(
-        pd.DataFrame(dim_mappings),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Target": st.column_config.TextColumn("Target Column", width="medium"),
-            "Type": st.column_config.TextColumn("Data Type", width="small"),
-            "Source": st.column_config.TextColumn("Source", width="medium"),
-            "Transform": st.column_config.TextColumn("Transformation Rule", width="large"),
-        },
-    )
-
-    st.markdown("---")
-
-    # Fact table lineage
-    st.markdown("### 🔶 fact_transactions")
-    st.markdown("*Fact table with surrogate key lookups and type flattening.*")
-    st.dataframe(
-        pd.DataFrame(fact_mappings),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Target": st.column_config.TextColumn("Target Column", width="medium"),
-            "Type": st.column_config.TextColumn("Data Type", width="small"),
-            "Source": st.column_config.TextColumn("Source", width="medium"),
-            "Transform": st.column_config.TextColumn("Transformation Rule", width="large"),
-        },
-    )
-
-    st.markdown("---")
+    if mapping_data:
+        for target_table, rules in mapping_data["mappings"].items():
+            icon = "🔷" if target_table.startswith("dim_") else "🔶"
+            st.markdown(f"### {icon} {target_table}")
+            rules_df = pd.DataFrame(rules)
+            st.dataframe(
+                rules_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "target_col":     st.column_config.TextColumn("Target Column", width="medium"),
+                    "target_dtype":   st.column_config.TextColumn("Type", width="small"),
+                    "source_table":   st.column_config.TextColumn("Source Table", width="medium"),
+                    "source_col":     st.column_config.TextColumn("Source Column", width="medium"),
+                    "transform_rule": st.column_config.TextColumn("Transform Rule", width="medium"),
+                    "enricher":       st.column_config.TextColumn("Enricher", width="medium"),
+                    "scd_type":       st.column_config.TextColumn("SCD Type", width="small"),
+                },
+            )
+            st.markdown("---")
+    else:
+        st.info(
+            "Upload a mapping sheet on the **🚀 Pipeline Control** page to see live lineage. "
+            "Showing fallback static view below."
+        )
+        dim_mappings = [
+            {"Target": "account_sk",      "Type": "INTEGER", "Source": "—",                          "Transform": "Auto-generated surrogate key"},
+            {"Target": "account_id",      "Type": "INTEGER", "Source": "accounts.account_id",         "Transform": "Direct mapping (Natural Key)"},
+            {"Target": "customer_id",     "Type": "INTEGER", "Source": "customers.customer_id",       "Transform": "INNER JOIN accounts ↔ customers"},
+            {"Target": "customer_name",   "Type": "VARCHAR", "Source": "customers.full_name",         "Transform": "Direct mapping (renamed)"},
+            {"Target": "customer_state",  "Type": "VARCHAR", "Source": "customers.state",             "Transform": "Direct mapping (renamed)"},
+            {"Target": "branch_name",     "Type": "VARCHAR", "Source": "branches.branch_name",        "Transform": "LEFT JOIN on branch_id"},
+            {"Target": "account_type",    "Type": "VARCHAR", "Source": "accounts.account_type",       "Transform": "Direct mapping"},
+            {"Target": "has_active_card", "Type": "BOOLEAN", "Source": "cards.is_active",             "Transform": "Derived: ANY(is_active) grouped by account_id"},
+            {"Target": "effective_from",  "Type": "DATE",    "Source": "—",                          "Transform": "SCD2: date row became current"},
+            {"Target": "effective_to",    "Type": "DATE",    "Source": "—",                          "Transform": "SCD2: date row expired (NULL = current)"},
+            {"Target": "is_current",      "Type": "BOOLEAN", "Source": "—",                          "Transform": "SCD2: TRUE for current version"},
+            {"Target": "version",         "Type": "INTEGER", "Source": "—",                          "Transform": "SCD2: version number (1 = original)"},
+        ]
+        fact_mappings = [
+            {"Target": "transaction_id",   "Type": "INTEGER", "Source": "transactions.transaction_id",  "Transform": "Direct mapping"},
+            {"Target": "account_sk",       "Type": "INTEGER", "Source": "dim_account_customer",         "Transform": "Lookup: account_id → current account_sk"},
+            {"Target": "date_sk",          "Type": "INTEGER", "Source": "dim_date",                     "Transform": "Lookup: transaction_date → date_sk"},
+            {"Target": "branch_sk",        "Type": "INTEGER", "Source": "dim_branch",                   "Transform": "Lookup: account→branch_id → branch_sk"},
+            {"Target": "transaction_date", "Type": "DATE",    "Source": "transactions.txn_timestamp",   "Transform": "Cast: TIMESTAMP → DATE"},
+            {"Target": "transaction_type", "Type": "VARCHAR", "Source": "transaction_types.type_name",  "Transform": "LEFT JOIN on type_id"},
+            {"Target": "amount",           "Type": "DECIMAL", "Source": "transactions.amount",          "Transform": "Direct mapping"},
+        ]
+        st.markdown("### 🔷 dim_account_customer")
+        st.dataframe(pd.DataFrame(dim_mappings), use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.markdown("### 🔶 fact_transactions")
+        st.dataframe(pd.DataFrame(fact_mappings), use_container_width=True, hide_index=True)
+        st.markdown("---")
 
     # Data Quality Summary
     st.markdown("### 📊 Data Quality Summary")
