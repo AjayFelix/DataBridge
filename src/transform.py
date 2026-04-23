@@ -52,6 +52,26 @@ def build_dim_date(parquet_dir: Path) -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════
+#  Branch Dimension Builder
+# ══════════════════════════════════════════════════════
+
+def build_dim_branch(parquet_dir: Path) -> pd.DataFrame:
+    """
+    Build dim_branch current-state snapshot from branches.parquet.
+    branch_sk (surrogate key) and SCD2 columns are assigned by load_scd2().
+    """
+    branches = pd.read_parquet(parquet_dir / "branches.parquet")
+    result = (
+        branches[["branch_id", "branch_name", "city", "state", "country"]]
+        .copy()
+        .sort_values("branch_id")
+        .reset_index(drop=True)
+    )
+    log.info("  dim_branch snapshot → %d rows", len(result))
+    return result
+
+
+# ══════════════════════════════════════════════════════
 #  Mapping Sheet Parser
 # ══════════════════════════════════════════════════════
 

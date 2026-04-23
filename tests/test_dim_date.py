@@ -100,3 +100,40 @@ def test_null_timestamps_raise(tmp_path):
     }).to_parquet(tmp_path / "transactions.parquet", index=False)
     with pytest.raises(ValueError, match="no valid txn_timestamp"):
         build_dim_date(tmp_path)
+
+
+from src.transform import build_dim_branch
+
+
+@pytest.fixture
+def branches_parquet(tmp_path):
+    pd.DataFrame({
+        "branch_id":   [1, 2, 3],
+        "branch_name": ["North Branch", "South Branch", "East Branch"],
+        "city":        ["Chennai", "Mumbai", "Delhi"],
+        "state":       ["TN", "MH", "DL"],
+        "country":     ["India", "India", "India"],
+    }).to_parquet(tmp_path / "branches.parquet", index=False)
+    return tmp_path
+
+
+def test_dim_branch_row_count(branches_parquet):
+    df = build_dim_branch(branches_parquet)
+    assert len(df) == 3
+
+
+def test_dim_branch_columns(branches_parquet):
+    df = build_dim_branch(branches_parquet)
+    expected = {"branch_id", "branch_name", "city", "state", "country"}
+    assert expected.issubset(set(df.columns))
+
+
+def test_dim_branch_no_sk_column(branches_parquet):
+    """branch_sk is assigned by load_scd2, not the builder."""
+    df = build_dim_branch(branches_parquet)
+    assert "branch_sk" not in df.columns
+
+
+def test_dim_branch_sorted_by_branch_id(branches_parquet):
+    df = build_dim_branch(branches_parquet)
+    assert list(df["branch_id"]) == sorted(df["branch_id"].tolist())
