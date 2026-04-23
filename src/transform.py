@@ -20,6 +20,36 @@ log = logging.getLogger("databridge.transform")
 
 
 # ══════════════════════════════════════════════════════
+#  Calendar Dimension Builder
+# ══════════════════════════════════════════════════════
+
+def build_dim_date(parquet_dir: Path) -> pd.DataFrame:
+    """
+    Generate dim_date from min/max txn_timestamp in transactions.parquet.
+    dim_date is immutable — regenerated fresh on every pipeline run.
+    """
+    txns = pd.read_parquet(parquet_dir / "transactions.parquet")
+    dates = pd.to_datetime(txns["txn_timestamp"])
+    date_range = pd.date_range(start=dates.min().date(), end=dates.max().date(), freq="D")
+
+    df = pd.DataFrame({"full_date": date_range})
+    df["date_sk"]     = (df["full_date"] - pd.Timestamp("2000-01-01")).dt.days.astype(int)
+    df["day_of_week"] = df["full_date"].dt.dayofweek + 1          # 1=Mon … 7=Sun
+    df["day_name"]    = df["full_date"].dt.day_name()
+    df["week_number"] = df["full_date"].dt.isocalendar().week.astype(int)
+    df["month"]       = df["full_date"].dt.month
+    df["month_name"]  = df["full_date"].dt.month_name()
+    df["quarter"]     = df["full_date"].dt.quarter
+    df["year"]        = df["full_date"].dt.year
+    df["is_weekend"]  = df["full_date"].dt.dayofweek >= 5
+    df["full_date"]   = df["full_date"].dt.date
+
+    log.info("  dim_date → %d rows", len(df))
+    return df[["date_sk", "full_date", "day_of_week", "day_name",
+               "week_number", "month", "month_name", "quarter", "year", "is_weekend"]]
+
+
+# ══════════════════════════════════════════════════════
 #  Mapping Sheet Parser
 # ══════════════════════════════════════════════════════
 
