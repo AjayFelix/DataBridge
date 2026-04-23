@@ -228,55 +228,63 @@ def build_dim_account_customer(parquet_dir: Path) -> pd.DataFrame:
     return result
 
 
-def build_fact_transactions(parquet_dir: Path, dim_df: pd.DataFrame) -> pd.DataFrame:
+def build_fact_transactions(
+    parquet_dir: Path,
+    dim_df: pd.DataFrame,
+    dim_date_df: pd.DataFrame,
+    dim_branch_df: pd.DataFrame,
+) -> pd.DataFrame:
     """
-    Build the fact_transactions fact table from raw Parquet files.
+    Build fact_transactions.
 
-    Transformation logic (from mapping sheet):
-      - transactions LEFT JOIN transaction_types ON type_id
-      - Lookup account_sk from dim_account_customer by account_id
-      - Cast txn_timestamp → transaction_date (date only)
-      - Select & rename columns per mapping spec
+    New FKs added vs original:
+      - date_sk    → lookup from dim_date by transaction_date
+      - branch_sk  → lookup from dim_branch via accounts.branch_id
     """
     log.info("Building fact_transactions …")
 
-    # ── Read source Parquet files ─────────────────────
-    transactions = pd.read_parquet(parquet_dir / "transactions.parquet")
+    transactions      = pd.read_parquet(parquet_dir / "transactions.parquet")
     transaction_types = pd.read_parquet(parquet_dir / "transaction_types.parquet")
+    accounts          = pd.read_parquet(parquet_dir / "accounts.parquet")
 
-    # ── Step 1: LEFT JOIN transaction_types ───────────
+    # ── Step 1: JOIN transaction_types ───────────────
     fact = transactions.merge(
-        transaction_types[["type_id", "type_name"]],
-        on="type_id",
+        transaction_types[["type_id", "type_name"]], on="type_id", how="left"
+    )
+
+    # ── Step 2: Lookup account_sk ─────────────────────
+    fact = fact.merge(dim_df[["account_sk", "account_id"]], on="account_id", how="left")
+
+    # ── Step 3: Cast timestamp → DATE ────────────────
+    fact["transaction_date"] = pd.to_datetime(fact["txn_timestamp"]).dt.date
+
+    # ── Step 4: Lookup date_sk ────────────────────────
+    date_lookup = dim_date_df[["date_sk", "full_date"]].copy()
+    date_lookup["full_date"] = pd.to_datetime(date_lookup["full_date"]).dt.date
+    fact = fact.merge(
+        date_lookup.rename(columns={"full_date": "transaction_date"}),
+        on="transaction_date",
         how="left",
     )
 
-    # ── Step 2: Lookup account_sk from dimension ──────
-    sk_lookup = dim_df[["account_sk", "account_id"]].copy()
-    fact = fact.merge(sk_lookup, on="account_id", how="left")
-
-    # ── Step 3: Cast txn_timestamp → DATE ─────────────
-    fact["transaction_date"] = pd.to_datetime(fact["txn_timestamp"]).dt.date
-
-    # ── Step 4: Select & rename to target schema ──────
-    result = fact[
-        [
-            "transaction_id",
-            "account_sk",
-            "transaction_date",
-            "type_name",
-            "amount",
-        ]
-    ].rename(
-        columns={
-            "type_name": "transaction_type",
-        }
+    # ── Step 5: Lookup branch_sk via accounts ─────────
+    acct_branch = accounts[["account_id", "branch_id"]].drop_duplicates()
+    fact = fact.merge(acct_branch, on="account_id", how="left")
+    fact = fact.merge(
+        dim_branch_df[["branch_sk", "branch_id"]], on="branch_id", how="left"
     )
 
-    # ── Cast types ────────────────────────────────────
+    # ── Step 6: Select & cast ─────────────────────────
+    result = fact[[
+        "transaction_id", "account_sk", "date_sk", "branch_sk",
+        "transaction_date", "type_name", "amount",
+    ]].rename(columns={"type_name": "transaction_type"})
+
     result["transaction_id"] = result["transaction_id"].astype(int)
-    result["account_sk"] = result["account_sk"].astype("Int64")  # nullable for unmatched
-    result["amount"] = result["amount"].astype(float)
+    result["account_sk"]     = result["account_sk"].astype("Int64")
+    result["date_sk"]        = result["date_sk"].astype("Int64")
+    result["branch_sk"]      = result["branch_sk"].astype("Int64")
+    result["amount"]         = result["amount"].astype(float)
 
     log.info("  fact_transactions → %d rows, %d cols", len(result), len(result.columns))
     return result
