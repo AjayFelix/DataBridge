@@ -112,11 +112,13 @@ def parse_mapping_sheet(xlsx_path: str | Path) -> dict:
         target_table = col_a
         if target_table and col_b:
             rule = {
-                "target_col": col_b,
-                "target_dtype": str(row[2]).strip() if row[2] else "",
-                "source_table": str(row[3]).strip() if row[3] else "None",
-                "source_col": str(row[4]).strip() if row[4] else "None",
+                "target_col":     str(row[1]).strip() if row[1] else "",
+                "target_dtype":   str(row[2]).strip() if row[2] else "",
+                "source_table":   str(row[3]).strip() if row[3] else "None",
+                "source_col":     str(row[4]).strip() if row[4] else "None",
                 "transform_rule": str(row[5]).strip() if row[5] else "",
+                "enricher":       str(row[6]).strip() if len(row) > 6 and row[6] and str(row[6]).strip() not in ("None", "") else "",
+                "scd_type":       int(row[7]) if len(row) > 7 and row[7] and str(row[7]).strip().isdigit() else 1,
             }
             if target_table not in mappings:
                 mappings[target_table] = []
@@ -288,6 +290,135 @@ def build_fact_transactions(
 
     log.info("  fact_transactions → %d rows, %d cols", len(result), len(result.columns))
     return result
+
+
+# ══════════════════════════════════════════════════════
+#  Hybrid Engine
+# ══════════════════════════════════════════════════════
+
+# Table-builder enrichers return a full pd.DataFrame.
+# Column enrichers are not used in this registry — they are
+# expressed as DIRECT/RENAME/CAST rules in the mapping sheet.
+TABLE_BUILDER_ENRICHERS: set[str] = {
+    "generate_date_dim",
+    "build_dim_account_customer_enricher",
+}
+
+ENRICHER_REGISTRY: dict[str, callable] = {
+    "generate_date_dim": lambda parquet_dir, ctx: build_dim_date(parquet_dir),
+    "build_dim_account_customer_enricher": lambda parquet_dir, ctx: build_dim_account_customer(parquet_dir),
+}
+
+# Build order: dims before fact.
+# fact_transactions is built separately in pipeline.py after dims are loaded.
+_BUILD_ORDER = ["dim_date", "dim_branch", "dim_account_customer"]
+
+
+def _apply_generic_rules(
+    rules: list[dict],
+    parquet_dir: Path,
+) -> pd.DataFrame:
+    """
+    Apply DIRECT, RENAME, and CAST:* rules to produce a DataFrame.
+
+    Reads each unique source_table once, then maps columns.
+    Assumes all rules for a given target table share the same primary source_table
+    (i.e. single-source tables like dim_branch). Multi-table joins must use enrichers.
+    """
+    # Collect unique source tables (ignore placeholder '—' and 'None')
+    source_tables = {
+        r["source_table"] for r in rules
+        if r["source_table"] not in ("—", "None", "", "none")
+    }
+
+    if not source_tables:
+        return pd.DataFrame()
+
+    # Read and merge source tables (for single-source tables this is just one read)
+    source_dfs: dict[str, pd.DataFrame] = {
+        t: pd.read_parquet(parquet_dir / f"{t}.parquet") for t in source_tables
+    }
+
+    # Start from the first source table; subsequent tables would be joined here
+    primary_table = next(iter(source_tables))
+    df = source_dfs[primary_table].copy()
+
+    result_cols: dict[str, pd.Series] = {}
+
+    for rule in rules:
+        if rule["enricher"]:
+            continue  # handled in enricher pass
+
+        src_table = rule["source_table"]
+        src_col   = rule["source_col"]
+        tgt_col   = rule["target_col"]
+        transform = rule["transform_rule"].upper()
+        src_df    = source_dfs.get(src_table, df)
+
+        if src_col not in ("None", "—", "") and src_col in src_df.columns:
+            if transform in ("DIRECT", "RENAME"):
+                result_cols[tgt_col] = src_df[src_col].values
+            elif transform.startswith("CAST:DATE"):
+                result_cols[tgt_col] = pd.to_datetime(src_df[src_col]).dt.date
+            elif transform.startswith("CAST:INT"):
+                result_cols[tgt_col] = src_df[src_col].astype(int)
+            elif transform.startswith("CAST:BOOL"):
+                result_cols[tgt_col] = src_df[src_col].astype(bool)
+
+    return pd.DataFrame(result_cols)
+
+
+def run_hybrid_transforms(
+    parquet_dir: Path,
+    mapping: dict,
+    progress_callback=None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Orchestrate dim-table transforms using the hybrid engine.
+
+    For each target table:
+      - If ANY rule has an enricher in TABLE_BUILDER_ENRICHERS → call that enricher.
+      - Otherwise → apply DIRECT/RENAME/CAST rules generically.
+
+    Returns DataFrames for dim tables only. fact_transactions is built
+    separately in pipeline.py after dims are loaded into DuckDB.
+    """
+    results: dict[str, pd.DataFrame] = {}
+    total = len(_BUILD_ORDER)
+
+    for step, target_table in enumerate(_BUILD_ORDER, start=1):
+        if target_table not in mapping.get("mappings", {}):
+            continue
+
+        rules = mapping["mappings"][target_table]
+
+        if progress_callback:
+            progress_callback(f"Building {target_table}", step, total)
+
+        # Check for a table-builder enricher
+        builder_name = next(
+            (r["enricher"] for r in rules if r["enricher"] in TABLE_BUILDER_ENRICHERS),
+            None,
+        )
+
+        # Check for any unknown enricher (raise early, clear error message)
+        for rule in rules:
+            name = rule["enricher"]
+            if name and name not in ENRICHER_REGISTRY:
+                raise KeyError(
+                    f"Enricher '{name}' not found in ENRICHER_REGISTRY. "
+                    f"Available: {sorted(ENRICHER_REGISTRY.keys())}"
+                )
+
+        if builder_name:
+            df = ENRICHER_REGISTRY[builder_name](parquet_dir, results)
+        else:
+            df = _apply_generic_rules(rules, parquet_dir)
+
+        results[target_table] = df
+        log.info("  run_hybrid_transforms: built %s (%d rows)", target_table, len(df))
+
+    return results
 
 
 def run_mapping_transforms(
