@@ -4,6 +4,7 @@ import datetime
 import pytest
 import pandas as pd
 from src.transform import build_dim_date
+from src.transform import build_dim_branch
 
 
 @pytest.fixture
@@ -102,16 +103,13 @@ def test_null_timestamps_raise(tmp_path):
         build_dim_date(tmp_path)
 
 
-from src.transform import build_dim_branch
-
-
 @pytest.fixture
 def branches_parquet(tmp_path):
     pd.DataFrame({
-        "branch_id":   [1, 2, 3],
-        "branch_name": ["North Branch", "South Branch", "East Branch"],
-        "city":        ["Chennai", "Mumbai", "Delhi"],
-        "state":       ["TN", "MH", "DL"],
+        "branch_id":   [3, 1, 2],
+        "branch_name": ["East Branch", "North Branch", "South Branch"],
+        "city":        ["Delhi", "Chennai", "Mumbai"],
+        "state":       ["DL", "TN", "MH"],
         "country":     ["India", "India", "India"],
     }).to_parquet(tmp_path / "branches.parquet", index=False)
     return tmp_path
@@ -124,8 +122,7 @@ def test_dim_branch_row_count(branches_parquet):
 
 def test_dim_branch_columns(branches_parquet):
     df = build_dim_branch(branches_parquet)
-    expected = {"branch_id", "branch_name", "city", "state", "country"}
-    assert expected.issubset(set(df.columns))
+    assert list(df.columns) == ["branch_id", "branch_name", "city", "state", "country"]
 
 
 def test_dim_branch_no_sk_column(branches_parquet):
