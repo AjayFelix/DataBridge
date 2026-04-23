@@ -157,6 +157,127 @@ def load_table_dedup(
     )
 
 
+# ── SCD Type 2 Load ─────────────────────────────────
+
+def load_scd2(
+    conn: duckdb.DuckDBPyConnection,
+    df: pd.DataFrame,
+    table_name: str,
+    natural_key: str,
+    tracked_cols: list[str],
+    surrogate_key_col: "str | None" = None,
+    today: "date | None" = None,
+) -> None:
+    """
+    SCD Type 2 upsert: tracks history for tracked_cols, expires old rows,
+    inserts new versions. Assigns surrogate keys if surrogate_key_col is given.
+
+    Non-tracked columns are Type 1 (overwritten in place for unchanged rows).
+    """
+    from datetime import date as _date, timedelta
+    today = today or _date.today()
+    yesterday = today - timedelta(days=1)
+
+    existing = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
+
+    if table_name not in existing:
+        init = df.copy()
+        if surrogate_key_col and surrogate_key_col not in init.columns:
+            init.insert(0, surrogate_key_col, range(1, len(init) + 1))
+        init["effective_from"] = pd.Timestamp(today)
+        init["effective_to"]   = pd.NaT
+        init["is_current"]     = True
+        init["version"]        = 1
+        conn.execute(f"CREATE TABLE {table_name} AS SELECT * FROM init")
+        log.info("  %s → initial SCD2 load: %d rows", table_name, len(df))
+        return
+
+    current = conn.execute(
+        f"SELECT * FROM {table_name} WHERE is_current = TRUE"
+    ).fetchdf()
+
+    incoming_keys = set(df[natural_key].tolist())
+    current_keys  = set(current[natural_key].tolist())
+    new_keys      = incoming_keys - current_keys
+    candidate_keys = incoming_keys & current_keys
+
+    changed_keys = []
+    for key in candidate_keys:
+        inc_row = df[df[natural_key] == key].iloc[0]
+        cur_row = current[current[natural_key] == key].iloc[0]
+        if any(str(inc_row[c]) != str(cur_row[c]) for c in tracked_cols):
+            changed_keys.append(key)
+
+    # 1. Expire changed rows
+    for key in changed_keys:
+        conn.execute(f"""
+            UPDATE {table_name}
+            SET effective_to = DATE '{yesterday.isoformat()}', is_current = FALSE
+            WHERE "{natural_key}" = {key!r} AND is_current = TRUE
+        """)
+
+    # 2. Insert new versions for changed rows + new rows
+    keys_to_insert = set(changed_keys) | new_keys
+    if keys_to_insert:
+        rows = df[df[natural_key].isin(keys_to_insert)].copy()
+        rows["effective_from"] = pd.Timestamp(today)
+        rows["effective_to"]   = pd.NaT
+        rows["is_current"]     = True
+
+        versions = []
+        for _, row in rows.iterrows():
+            key = row[natural_key]
+            if key in changed_keys:
+                old_v = int(current[current[natural_key] == key]["version"].iloc[0])
+                versions.append(old_v + 1)
+            else:
+                versions.append(1)
+        rows["version"] = versions
+
+        if surrogate_key_col:
+            max_sk = conn.execute(
+                f'SELECT COALESCE(MAX("{surrogate_key_col}"), 0) FROM {table_name}'
+            ).fetchone()[0]
+            rows[surrogate_key_col] = range(int(max_sk) + 1,
+                                            int(max_sk) + 1 + len(rows))
+
+        # Align column order to match the existing table schema
+        table_cols = conn.execute(
+            f"SELECT column_name FROM information_schema.columns "
+            f"WHERE table_name = '{table_name}' ORDER BY ordinal_position"
+        ).fetchdf()["column_name"].tolist()
+        rows = rows[[c for c in table_cols if c in rows.columns]]
+
+        conn.execute(f"INSERT INTO {table_name} SELECT * FROM rows")
+
+    # 3. Type 1 overwrite for non-tracked columns on UNCHANGED rows
+    unchanged_keys = candidate_keys - set(changed_keys)
+    scd_meta_cols  = {"effective_from", "effective_to", "is_current", "version"}
+    type1_cols     = [
+        c for c in df.columns
+        if c not in tracked_cols
+        and c != natural_key
+        and c not in scd_meta_cols
+        and (surrogate_key_col is None or c != surrogate_key_col)
+    ]
+    for key in unchanged_keys:
+        inc_row = df[df[natural_key] == key].iloc[0]
+        for col in type1_cols:
+            val = inc_row[col]
+            val_repr = f"'{val}'" if isinstance(val, str) else repr(val)
+            conn.execute(f"""
+                UPDATE {table_name}
+                SET "{col}" = {val_repr}
+                WHERE "{natural_key}" = {key!r} AND is_current = TRUE
+            """)
+
+    log.info(
+        "  %s SCD2: %d changed, %d new, %d unchanged (Type1 cols: %s)",
+        table_name, len(changed_keys), len(new_keys),
+        len(candidate_keys) - len(changed_keys), type1_cols,
+    )
+
+
 # ── Star Schema Load (Phase 3) ───────────────────────
 
 def load_star_schema(
