@@ -9,8 +9,10 @@ Phase 3 of the three-phase pipeline:
   Extract → Transform → Load (DataFrames → DuckDB)
 """
 
+import math
 import os
 import logging
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -159,14 +161,30 @@ def load_table_dedup(
 
 # ── SCD Type 2 Load ─────────────────────────────────
 
+def _vals_equal(a, b) -> bool:
+    """Normalised equality check for SCD2 change detection.
+
+    Handles:
+    - NaN == NaN (both float NaN → equal, no false-positive change)
+    - bool/int coercion (True == 1, False == 0 → equal)
+    - everything else uses standard equality
+    """
+    if isinstance(a, float) and isinstance(b, float):
+        if math.isnan(a) and math.isnan(b):
+            return True
+    if isinstance(a, (bool, int)) and isinstance(b, (bool, int)):
+        return bool(a) == bool(b)
+    return a == b
+
+
 def load_scd2(
     conn: duckdb.DuckDBPyConnection,
     df: pd.DataFrame,
     table_name: str,
     natural_key: str,
     tracked_cols: list[str],
-    surrogate_key_col: "str | None" = None,
-    today: "date | None" = None,
+    surrogate_key_col: str | None = None,
+    today: date | None = None,
 ) -> None:
     """
     SCD Type 2 upsert: tracks history for tracked_cols, expires old rows,
@@ -174,8 +192,8 @@ def load_scd2(
 
     Non-tracked columns are Type 1 (overwritten in place for unchanged rows).
     """
-    from datetime import date as _date, timedelta
-    today = today or _date.today()
+    from datetime import timedelta
+    today = today or date.today()
     yesterday = today - timedelta(days=1)
 
     existing = [r[0] for r in conn.execute("SHOW TABLES").fetchall()]
@@ -205,10 +223,11 @@ def load_scd2(
     for key in candidate_keys:
         inc_row = df[df[natural_key] == key].iloc[0]
         cur_row = current[current[natural_key] == key].iloc[0]
-        if any(str(inc_row[c]) != str(cur_row[c]) for c in tracked_cols):
+        if any(not _vals_equal(inc_row[c], cur_row[c]) for c in tracked_cols):
             changed_keys.append(key)
 
     # 1. Expire changed rows
+    changed_keys_set = set(changed_keys)
     for key in changed_keys:
         conn.execute(f"""
             UPDATE {table_name}
@@ -217,7 +236,7 @@ def load_scd2(
         """)
 
     # 2. Insert new versions for changed rows + new rows
-    keys_to_insert = set(changed_keys) | new_keys
+    keys_to_insert = changed_keys_set | new_keys
     if keys_to_insert:
         rows = df[df[natural_key].isin(keys_to_insert)].copy()
         rows["effective_from"] = pd.Timestamp(today)
@@ -227,7 +246,7 @@ def load_scd2(
         versions = []
         for _, row in rows.iterrows():
             key = row[natural_key]
-            if key in changed_keys:
+            if key in changed_keys_set:
                 old_v = int(current[current[natural_key] == key]["version"].iloc[0])
                 versions.append(old_v + 1)
             else:
@@ -251,7 +270,7 @@ def load_scd2(
         conn.execute(f"INSERT INTO {table_name} SELECT * FROM rows")
 
     # 3. Type 1 overwrite for non-tracked columns on UNCHANGED rows
-    unchanged_keys = candidate_keys - set(changed_keys)
+    unchanged_keys = candidate_keys - changed_keys_set
     scd_meta_cols  = {"effective_from", "effective_to", "is_current", "version"}
     type1_cols     = [
         c for c in df.columns
@@ -264,7 +283,12 @@ def load_scd2(
         inc_row = df[df[natural_key] == key].iloc[0]
         for col in type1_cols:
             val = inc_row[col]
-            val_repr = f"'{val}'" if isinstance(val, str) else repr(val)
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                val_repr = "NULL"
+            elif isinstance(val, str):
+                val_repr = "'" + val.replace("'", "''") + "'"
+            else:
+                val_repr = repr(val)
             conn.execute(f"""
                 UPDATE {table_name}
                 SET "{col}" = {val_repr}

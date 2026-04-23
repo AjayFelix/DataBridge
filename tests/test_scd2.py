@@ -144,5 +144,43 @@ def test_surrogate_key_incremented_for_new_version(conn, branch_df):
     new_sk = conn.execute(
         "SELECT branch_sk FROM dim_branch WHERE branch_id = 1 AND is_current = TRUE"
     ).fetchone()[0]
-    # Must be > 2 (the max from initial load)
-    assert new_sk > 2
+    # Must be exactly 3 (max from initial load is 2, next is 3)
+    assert new_sk == 3
+
+
+def test_type1_col_updated_in_place(conn, branch_df):
+    """Non-tracked columns (Type 1) are updated in-place without creating a new version."""
+    _scd2(conn, branch_df, today=TODAY)
+
+    updated = branch_df.copy()
+    updated.loc[updated["branch_id"] == 1, "country"] = "IN"
+    _scd2(conn, updated, today=TOMORROW)
+
+    # Still 2 rows — no new version created
+    assert conn.execute("SELECT COUNT(*) FROM dim_branch").fetchone()[0] == 2
+    # Country updated in-place on current row
+    row = conn.execute(
+        "SELECT country FROM dim_branch WHERE branch_id = 1 AND is_current = TRUE"
+    ).fetchdf().iloc[0]
+    assert row["country"] == "IN"
+
+
+def test_multi_step_history(conn, branch_df):
+    """Two successive changes to same key produce three version rows."""
+    _scd2(conn, branch_df, today=TODAY)
+
+    step2 = branch_df.copy()
+    step2.loc[step2["branch_id"] == 1, "branch_name"] = "North v2"
+    _scd2(conn, step2, today=TOMORROW)
+
+    step3 = step2.copy()
+    step3.loc[step3["branch_id"] == 1, "branch_name"] = "North v3"
+    _scd2(conn, step3, today=TOMORROW + timedelta(days=1))
+
+    # 4 rows: id=1 v1, id=1 v2, id=1 v3, id=2 v1
+    assert conn.execute("SELECT COUNT(*) FROM dim_branch").fetchone()[0] == 4
+    # Only v3 is current
+    curr = conn.execute(
+        "SELECT version FROM dim_branch WHERE branch_id = 1 AND is_current = TRUE"
+    ).fetchone()[0]
+    assert curr == 3
