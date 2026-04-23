@@ -29,7 +29,9 @@ def build_dim_date(parquet_dir: Path) -> pd.DataFrame:
     dim_date is immutable — regenerated fresh on every pipeline run.
     """
     txns = pd.read_parquet(parquet_dir / "transactions.parquet")
-    dates = pd.to_datetime(txns["txn_timestamp"])
+    dates = pd.to_datetime(txns["txn_timestamp"]).dropna()
+    if dates.empty:
+        raise ValueError("transactions.parquet contains no valid txn_timestamp values")
     date_range = pd.date_range(start=dates.min().date(), end=dates.max().date(), freq="D")
 
     df = pd.DataFrame({"full_date": date_range})

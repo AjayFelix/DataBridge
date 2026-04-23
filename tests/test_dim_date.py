@@ -1,4 +1,6 @@
 """Tests for build_dim_date()."""
+import datetime
+
 import pytest
 import pandas as pd
 from src.transform import build_dim_date
@@ -59,6 +61,42 @@ def test_april_is_q2(parquet_dir):
 
 def test_required_columns(parquet_dir):
     df = build_dim_date(parquet_dir)
-    required = {"date_sk", "full_date", "day_of_week", "day_name",
-                "week_number", "month", "month_name", "quarter", "year", "is_weekend"}
-    assert required.issubset(set(df.columns))
+    assert list(df.columns) == [
+        "date_sk", "full_date", "day_of_week", "day_name",
+        "week_number", "month", "month_name", "quarter", "year", "is_weekend"
+    ]
+
+
+# ── Test A: day_of_week numeric mapping (1=Mon, 7=Sun) ──────────────────────
+
+def test_day_of_week_monday_is_1(parquet_dir):
+    df = build_dim_date(parquet_dir)
+    # 2024-01-08 is a Monday
+    row = df[df["full_date"] == pd.Timestamp("2024-01-08").date()].iloc[0]
+    assert row["day_of_week"] == 1
+
+
+def test_day_of_week_saturday_is_6(parquet_dir):
+    df = build_dim_date(parquet_dir)
+    # 2024-01-06 is a Saturday; with Mon=1 … Sun=7, Saturday=6
+    row = df[df["full_date"] == pd.Timestamp("2024-01-06").date()].iloc[0]
+    assert row["day_of_week"] == 6
+
+
+# ── Test B: full_date stored as Python datetime.date (not Timestamp) ─────────
+
+def test_full_date_is_date_object(parquet_dir):
+    df = build_dim_date(parquet_dir)
+    assert isinstance(df["full_date"].iloc[0], datetime.date)
+    assert not isinstance(df["full_date"].iloc[0], datetime.datetime)
+
+
+# ── Test D: NaT guard raises ValueError ──────────────────────────────────────
+
+def test_null_timestamps_raise(tmp_path):
+    pd.DataFrame({
+        "transaction_id": [1],
+        "txn_timestamp": [pd.NaT],
+    }).to_parquet(tmp_path / "transactions.parquet", index=False)
+    with pytest.raises(ValueError, match="no valid txn_timestamp"):
+        build_dim_date(tmp_path)
