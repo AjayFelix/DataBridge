@@ -46,21 +46,21 @@ PK_MAP = {
 }
 
 # ── SCD Type 2 Configuration ──────────────────────────
-SCD2_TABLES: set[str] = {"dim_branch", "dim_account_customer"}
+SCD2_TABLES: set[str] = {DIM_BRANCH_TABLE, DIM_TABLE}
 
 SCD2_TRACKED_COLS: dict[str, list[str]] = {
-    "dim_branch":           ["branch_name", "city", "state"],
-    "dim_account_customer": ["account_type", "branch_name", "has_active_card"],
+    DIM_BRANCH_TABLE: ["branch_name", "city", "state"],
+    DIM_TABLE:        ["account_type", "branch_name", "has_active_card"],
 }
 
 SCD2_NATURAL_KEYS: dict[str, str] = {
-    "dim_branch":           "branch_id",
-    "dim_account_customer": "account_id",
+    DIM_BRANCH_TABLE: "branch_id",
+    DIM_TABLE:        "account_id",
 }
 
 SCD2_SURROGATE_KEYS: dict[str, str] = {
-    "dim_branch":           "branch_sk",
-    "dim_account_customer": "account_sk",
+    DIM_BRANCH_TABLE: "branch_sk",
+    DIM_TABLE:        "account_sk",
 }
 
 
