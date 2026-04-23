@@ -166,14 +166,23 @@ def _vals_equal(a, b) -> bool:
 
     Handles:
     - NaN == NaN (both float NaN → equal, no false-positive change)
+    - None == None (both null → equal)
+    - None vs NaN cross-type (both are "null" → equal)
+    - np.bool_ and np.integer types (not just Python bool/int)
     - bool/int coercion (True == 1, False == 0 → equal)
     - everything else uses standard equality
     """
-    if isinstance(a, float) and isinstance(b, float):
-        if math.isnan(a) and math.isnan(b):
-            return True
-    if isinstance(a, (bool, int)) and isinstance(b, (bool, int)):
-        return bool(a) == bool(b)
+    a_nan = a is None or (isinstance(a, float) and math.isnan(a))
+    b_nan = b is None or (isinstance(b, float) and math.isnan(b))
+    if a_nan and b_nan:
+        return True
+    try:
+        import numpy as np
+        if isinstance(a, (bool, int, np.bool_, np.integer)) and isinstance(b, (bool, int, np.bool_, np.integer)):
+            return bool(a) == bool(b)
+    except ImportError:
+        if isinstance(a, (bool, int)) and isinstance(b, (bool, int)):
+            return bool(a) == bool(b)
     return a == b
 
 
@@ -288,7 +297,7 @@ def load_scd2(
             elif isinstance(val, str):
                 val_repr = "'" + val.replace("'", "''") + "'"
             else:
-                val_repr = repr(val)
+                val_repr = repr(val.item() if hasattr(val, "item") else val)
             conn.execute(f"""
                 UPDATE {table_name}
                 SET "{col}" = {val_repr}

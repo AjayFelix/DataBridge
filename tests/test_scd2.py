@@ -184,3 +184,39 @@ def test_multi_step_history(conn, branch_df):
         "SELECT version FROM dim_branch WHERE branch_id = 1 AND is_current = TRUE"
     ).fetchone()[0]
     assert curr == 3
+
+
+@pytest.fixture
+def branch_df_with_code():
+    """branch_df with a numeric Type 1 column (region_code) to exercise numeric repr path."""
+    return pd.DataFrame({
+        "branch_id":   [1, 2],
+        "branch_name": ["North", "South"],
+        "city":        ["Chennai", "Mumbai"],
+        "state":       ["TN", "MH"],
+        "country":     ["India", "India"],
+        "region_code": [10, 20],
+    })
+
+
+def test_type1_numeric_col_updated_in_place(conn, branch_df_with_code):
+    """Numeric Type 1 column updates in place without creating a new version."""
+    load_scd2(
+        conn, branch_df_with_code, "dim_branch2", "branch_id",
+        ["branch_name", "city", "state"],
+        today=TODAY,
+    )
+
+    updated = branch_df_with_code.copy()
+    updated.loc[updated["branch_id"] == 1, "region_code"] = 99
+    load_scd2(
+        conn, updated, "dim_branch2", "branch_id",
+        ["branch_name", "city", "state"],
+        today=TOMORROW,
+    )
+
+    assert conn.execute("SELECT COUNT(*) FROM dim_branch2").fetchone()[0] == 2
+    code = conn.execute(
+        "SELECT region_code FROM dim_branch2 WHERE branch_id = 1 AND is_current = TRUE"
+    ).fetchone()[0]
+    assert int(code) == 99
