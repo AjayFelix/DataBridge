@@ -220,3 +220,19 @@ def test_type1_numeric_col_updated_in_place(conn, branch_df_with_code):
         "SELECT region_code FROM dim_branch2 WHERE branch_id = 1 AND is_current = TRUE"
     ).fetchone()[0]
     assert int(code) == 99
+
+
+def test_integer_tracked_col_change_detected(conn):
+    """Non-zero integer → different non-zero integer in a tracked col must create a new version."""
+    df = pd.DataFrame({
+        "region_id":   [1],
+        "score":       [10],
+    })
+    load_scd2(conn, df, "dim_score_test", "region_id", ["score"], today=TODAY)
+
+    df2 = df.copy()
+    df2.loc[0, "score"] = 20   # different non-zero integer
+    load_scd2(conn, df2, "dim_score_test", "region_id", ["score"], today=TOMORROW)
+
+    # Must be 2 rows (old expired + new version)
+    assert conn.execute("SELECT COUNT(*) FROM dim_score_test").fetchone()[0] == 2

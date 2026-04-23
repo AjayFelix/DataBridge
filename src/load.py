@@ -178,10 +178,10 @@ def _vals_equal(a, b) -> bool:
         return True
     try:
         import numpy as np
-        if isinstance(a, (bool, int, np.bool_, np.integer)) and isinstance(b, (bool, int, np.bool_, np.integer)):
+        if isinstance(a, (bool, np.bool_)) and isinstance(b, (bool, np.bool_)):
             return bool(a) == bool(b)
     except ImportError:
-        if isinstance(a, (bool, int)) and isinstance(b, (bool, int)):
+        if isinstance(a, bool) and isinstance(b, bool):
             return bool(a) == bool(b)
     return a == b
 
