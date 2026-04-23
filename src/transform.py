@@ -111,7 +111,10 @@ def parse_mapping_sheet(xlsx_path: str | Path) -> dict:
             continue
 
         target_table = col_a
-        if target_table and col_b:
+        if target_table:
+            current_target = target_table
+        effective_target = current_target
+        if effective_target and col_b:
             rule = {
                 "target_col":     str(row[1]).strip() if row[1] else "",
                 "target_dtype":   str(row[2]).strip() if row[2] else "",
@@ -121,9 +124,9 @@ def parse_mapping_sheet(xlsx_path: str | Path) -> dict:
                 "enricher":       str(row[6]).strip() if len(row) > 6 and row[6] and str(row[6]).strip() not in ("None", "") else "",
                 "scd_type":       (lambda v: int(float(str(v))))(row[7]) if len(row) > 7 and row[7] is not None else 1,
             }
-            if target_table not in mappings:
-                mappings[target_table] = []
-            mappings[target_table].append(rule)
+            if effective_target not in mappings:
+                mappings[effective_target] = []
+            mappings[effective_target].append(rule)
 
     wb.close()
 
