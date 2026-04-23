@@ -11,6 +11,7 @@ Also retains generic cleaning utilities for ad-hoc use.
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -118,7 +119,7 @@ def parse_mapping_sheet(xlsx_path: str | Path) -> dict:
                 "source_col":     str(row[4]).strip() if row[4] else "None",
                 "transform_rule": str(row[5]).strip() if row[5] else "",
                 "enricher":       str(row[6]).strip() if len(row) > 6 and row[6] and str(row[6]).strip() not in ("None", "") else "",
-                "scd_type":       int(row[7]) if len(row) > 7 and row[7] and str(row[7]).strip().isdigit() else 1,
+                "scd_type":       (lambda v: int(float(str(v))))(row[7]) if len(row) > 7 and row[7] is not None else 1,
             }
             if target_table not in mappings:
                 mappings[target_table] = []
@@ -304,10 +305,15 @@ TABLE_BUILDER_ENRICHERS: set[str] = {
     "build_dim_account_customer_enricher",
 }
 
-ENRICHER_REGISTRY: dict[str, callable] = {
+ENRICHER_REGISTRY: dict[str, Callable[..., pd.DataFrame]] = {
     "generate_date_dim": lambda parquet_dir, ctx: build_dim_date(parquet_dir),
     "build_dim_account_customer_enricher": lambda parquet_dir, ctx: build_dim_account_customer(parquet_dir),
 }
+
+assert TABLE_BUILDER_ENRICHERS <= set(ENRICHER_REGISTRY), (
+    f"TABLE_BUILDER_ENRICHERS contains names not in ENRICHER_REGISTRY: "
+    f"{TABLE_BUILDER_ENRICHERS - set(ENRICHER_REGISTRY)}"
+)
 
 # Build order: dims before fact.
 # fact_transactions is built separately in pipeline.py after dims are loaded.
@@ -339,10 +345,6 @@ def _apply_generic_rules(
         t: pd.read_parquet(parquet_dir / f"{t}.parquet") for t in source_tables
     }
 
-    # Start from the first source table; subsequent tables would be joined here
-    primary_table = next(iter(source_tables))
-    df = source_dfs[primary_table].copy()
-
     result_cols: dict[str, pd.Series] = {}
 
     for rule in rules:
@@ -353,7 +355,7 @@ def _apply_generic_rules(
         src_col   = rule["source_col"]
         tgt_col   = rule["target_col"]
         transform = rule["transform_rule"].upper()
-        src_df    = source_dfs.get(src_table, df)
+        src_df    = source_dfs.get(src_table, next(iter(source_dfs.values())))
 
         if src_col not in ("None", "—", "") and src_col in src_df.columns:
             if transform in ("DIRECT", "RENAME"):
@@ -393,7 +395,7 @@ def run_hybrid_transforms(
         rules = mapping["mappings"][target_table]
 
         if progress_callback:
-            progress_callback(f"Building {target_table}", step, total)
+            progress_callback("Transform", f"Building {target_table}", step / total)
 
         # Check for a table-builder enricher
         builder_name = next(

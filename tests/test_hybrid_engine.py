@@ -62,7 +62,7 @@ def test_rename_rule_renames_column(branch_parquet):
     assert "city" not in results["dim_branch"].columns
 
 
-def test_cast_date_rule(branch_parquet):
+def test_generate_date_dim_enricher(branch_parquet):
     mapping = _make_mapping({
         "dim_date": [
             {"target_col": "dim_date_placeholder", "source_table": "—", "source_col": "—",
