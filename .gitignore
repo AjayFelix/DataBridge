@@ -27,3 +27,5 @@ Thumbs.db
 ~.xlsx
 *.db
 .claude/
+CLAUDE.md
+.coverage
